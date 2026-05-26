@@ -1,64 +1,83 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(capra_landolt_ros)
 
-add_compile_options(-std=c++11)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 14)
+endif()
 
-find_package(Boost REQUIRED COMPONENTS thread)
+# 1. Abhängigkeiten suchen
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(catkin REQUIRED COMPONENTS
-  cv_bridge
-  image_transport
-  roscpp
-  sensor_msgs
-  std_msgs
-  image_publisher
-  roslint
-  capra_landolt_msgs
-)
-
-catkin_package(
-  CATKIN_DEPENDS 
-    nodelet 
-    cv_bridge 
-    roscpp 
-    sensor_msgs
-    capra_landolt_msgs
-    std_msgs 
-    image_transport
-  DEPENDS
-    Boost
-)
+find_package(cv_bridge REQUIRED)
+find_package(image_transport REQUIRED)
+find_package(capra_landolt_msgs REQUIRED)
 
 include_directories(
-  ${catkin_INCLUDE_DIRS}
-  ${Boost_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
 
-add_library(${PROJECT_NAME} src/LandoltNodelet.cpp)
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} ${Boost_LIBRARIES} ${OpenCV_LIBRARIES})
-add_dependencies(${PROJECT_NAME} capra_landolt_msgs_gencpp)
-
-if(catkin_EXPORTED_LIBRARIES)
-  add_dependencies(${PROJECT_NAME} ${catkin_EXPORTED_LIBRARIES})
-endif()
-
-roslint_cpp()
-
-install(TARGETS ${PROJECT_NAME}
-  DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+# 2. Haupt-Knoten (Executable) erstellen und konfigurieren
+add_executable(landolt_node
+  src/LandoltNode.cpp
 )
 
-install(FILES nodelet.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+ament_target_dependencies(landolt_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  cv_bridge
+  image_transport
+  capra_landolt_msgs
+)
+
+# Das Linken der Haupt-Node gehört DIREKT hierhin, vor die Tests/Installationen!
+target_link_libraries(landolt_node ${OpenCV_LIBRARIES})
+
+
+# 3. Tests (falls aktiviert)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
+  # C++ Test-Executable erstellen
+  add_executable(landolt_test_exe test/landolt_test.cpp)
+  
+  target_link_libraries(landolt_test_exe 
+    ${OpenCV_LIBRARIES}
+    gtest
+    gtest_main
+  )
+  
+  ament_target_dependencies(landolt_test_exe
+    rclcpp
+    cv_bridge
+    image_transport
+    capra_landolt_msgs
+    sensor_msgs
+  )
+
+  # Den Integrationstest registrieren
+  add_launch_test(launch/test_landolt.launch.py)
+endif()
+
+
+# 4. Installations-Regeln (Erst ausführen, wenn alle Targets fertig konfiguriert sind)
+install(TARGETS landolt_node landolt_test_exe
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY launch
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  DESTINATION share/${PROJECT_NAME}/
 )
 
-if(CATKIN_ENABLE_TESTING)
-    find_package(rostest REQUIRED)
-    add_rostest_gtest(landolt_test test/capra_detection.test test/landolt_test.cpp)
-    target_link_libraries(landolt_test ${catkin_LIBRARIES})
-endif()
+# Sicherstellen, dass auch der Test-Ordner (mit den Bildern) im Share-Pfad landet!
+install(DIRECTORY test
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+# 5. Paket-Makro abschließen
+ament_package()

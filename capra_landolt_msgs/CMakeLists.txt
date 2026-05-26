@@ -1,39 +1,30 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(capra_landolt_msgs)
 
-find_package(catkin REQUIRED COMPONENTS
-  message_generation
-  std_msgs
+# 1. Compiler-Standard setzen (wichtig für ROS2 C++ Support)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 14)
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# 2. Pakete finden
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+
+# 3. Interfaces generieren
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Landolts.msg"
+  "msg/BoundingCircles.msg"
+  "msg/Point2f.msg"
+  DEPENDENCIES std_msgs
 )
 
-# Generate messages in the 'msg' folder
-add_message_files(
-  FILES
-  Landolts.msg
-  BoundingCircles.msg
-  Point2f.msg
-)
+# 4. WICHTIG: Die Interfaces exportieren, damit andere Pakete sie nutzen können
+ament_export_dependencies(rosidl_default_runtime)
 
-## Generate services in the 'srv' folder
-# add_service_files(
-#   FILES
-#   Service1.srv
-#   Service2.srv
-# )
-
-## Generate actions in the 'action' folder
-# add_action_files(
-#   FILES
-#   Action1.action
-#   Action2.action
-# )
-
-# Generate added messages and services with any dependencies listed here
-generate_messages(
-  DEPENDENCIES
-  std_msgs
-)
-
-catkin_package(
-  CATKIN_DEPENDS message_runtime std_msgs
-)
+# 5. Paket registrieren
+ament_package()

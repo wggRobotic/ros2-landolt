@@ -1,12 +1,20 @@
-// Bring in my package's API, which is what I'm testing
-#include <ros/ros.h>
-#include <gtest/gtest.h>
-#include <cv_bridge/cv_bridge.h>
-#include <opencv2/highgui/highgui.hpp>
-#include <image_transport/image_transport.h>
-#include <capra_landolt_msgs/Landolts.h>
-#include <capra_landolt_msgs/BoundingCircles.h>
-#include <sensor_msgs/CameraInfo.h>
+#include <memory>
+#include <vector>
+#include <cmath>
+#include <string>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
+#include "gtest/gtest.h"
+#include "rclcpp/rclcpp.hpp"
+#include "cv_bridge/cv_bridge.hpp"
+#include "opencv2/highgui.hpp"
+#include "image_transport/image_transport.hpp"
+
+#include "capra_landolt_msgs/msg/landolts.hpp"
+#include "capra_landolt_msgs/msg/bounding_circles.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 
 struct MetaData {
     std::vector<float> angles;
@@ -19,13 +27,16 @@ class LandoltTest : public testing::Test
 protected:
     virtual void SetUp()
     {
+        node_ = rclcpp::Node::make_shared("landolt_test_node");
+
+        // WICHTIG: Topics anpassen, damit sie zu den Parametern deiner LandoltNode passen!
         topic_angles_ = "landolts";
-        topic_images_ = "image";
+        topic_images_ = "/capra/camera_3d/rgb/image_raw"; // Direkt auf das globale Kameratopic matchen
         topic_boundings_ = "boundings";
 
-        nh_.getParam("datapath", data_path_);
+        node_->declare_parameter<std::string>("datapath", "");
+        node_->get_parameter("datapath", data_path_);
 
-        // Taken from vision_opencv/image_geometry/test/utest.cpp
         double D[] = {-0.363528858080088, 0.16117037733986861, -8.1109585007538829e-05, -0.00044776712298447841, 0.0};
         double K[] = {430.15433020105519,                0.0, 311.71339830549732,
                       0.0, 430.60920415473657, 221.06824942698509,
@@ -40,120 +51,112 @@ protected:
         cam_info_.header.frame_id = "tf_frame";
         cam_info_.height = 480;
         cam_info_.width  = 640;
-        // No ROI
-        cam_info_.D.resize(5);
-        std::copy(D, D+5, cam_info_.D.begin());
-        std::copy(K, K+9, cam_info_.K.begin());
-        std::copy(R, R+9, cam_info_.R.begin());
-        std::copy(P, P+12, cam_info_.P.begin());
+        cam_info_.d.resize(5);
+        std::copy(D, D+5, cam_info_.d.begin());
+        std::copy(K, K+9, cam_info_.k.begin());
+        std::copy(R, R+9, cam_info_.r.begin());
+        std::copy(P, P+12, cam_info_.p.begin());
 
-        // Create raw camera subscriber and publisher
-        angles_sub_ = nh_.subscribe<capra_landolt_msgs::Landolts>(topic_angles_, 1, &LandoltTest::landoltsCallback, this);
-        bound_sub_ = nh_.subscribe<capra_landolt_msgs::BoundingCircles>(topic_boundings_, 1, &LandoltTest::boundingsCallback, this);
+        // Subscriber & Publisher
+        angles_sub_ = node_->create_subscription<capra_landolt_msgs::msg::Landolts>(
+            topic_angles_, 10, std::bind(&LandoltTest::landoltsCallback, this, std::placeholders::_1));
+        
+        bound_sub_ = node_->create_subscription<capra_landolt_msgs::msg::BoundingCircles>(
+            topic_boundings_, 10, std::bind(&LandoltTest::boundingsCallback, this, std::placeholders::_1));
 
-        image_transport::ImageTransport it(nh_);
-        image_sub_ = it.subscribe(topic_images_, 1, &LandoltTest::imageCallback, this);
-        cam_pub_ = it.advertiseCamera("/capra/camera_3d/rgb/image_raw", 1);
-        //Wait for all publisher and subscriber to connect
-        while(angles_sub_.getNumPublishers() == 0 || 
-            bound_sub_.getNumPublishers() == 0 || 
-            image_sub_.getNumPublishers() == 0 ||
-            cam_pub_.getNumSubscribers() == 0)
-        {
-            ros::spinOnce();
+        image_sub_ = image_transport::create_subscription(node_.get(), topic_images_,
+            std::bind(&LandoltTest::imageCallback, this, std::placeholders::_1), "raw");
+
+        cam_pub_ = image_transport::create_camera_publisher(node_.get(), topic_images_);
+
+        // DDS Discovery etwas Zeit geben (2 Sekunden spinnen statt Endlosschleife)
+        auto start_time = node_->now();
+        while ((node_->now() - start_time).seconds() < 2.0) {
+            rclcpp::spin_some(node_);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 
     std::string data_path_;
-
-    ros::NodeHandle nh_;
+    rclcpp::Node::SharedPtr node_;
     std::string topic_angles_;
     std::string topic_boundings_;
     std::string topic_images_;
 
-    int callback_count_;
+    int callback_count_ = 0;
     cv::Mat received_image_;
     std::vector<float> received_landolts_;
-    std::vector<capra_landolt_msgs::Point2f> received_centers_;
+    std::vector<capra_landolt_msgs::msg::Point2f> received_centers_;
     std::vector<float> received_radius_;
 
-    sensor_msgs::CameraInfo cam_info_;
-
+    sensor_msgs::msg::CameraInfo cam_info_;
     MetaData image_meta_;
 
-    ros::Subscriber angles_sub_;
-    ros::Subscriber bound_sub_;
+    rclcpp::Subscription<capra_landolt_msgs::msg::Landolts>::SharedPtr angles_sub_;
+    rclcpp::Subscription<capra_landolt_msgs::msg::BoundingCircles>::SharedPtr bound_sub_;
     image_transport::Subscriber image_sub_;
     image_transport::CameraPublisher cam_pub_;
 
 public:
-    void boundingsCallback(const capra_landolt_msgs::BoundingCircles::ConstPtr& msg)
-    {
+    void boundingsCallback(const capra_landolt_msgs::msg::BoundingCircles::SharedPtr msg) {
         received_centers_ = msg->centers;
         received_radius_ = msg->radius;
         callback_count_++;
     }
 
-    void landoltsCallback(const capra_landolt_msgs::Landolts::ConstPtr& msg)
-    {
+    void landoltsCallback(const capra_landolt_msgs::msg::Landolts::SharedPtr msg) {
         received_landolts_ = msg->angles;
         callback_count_++;
     }
 
-    void imageCallback(const sensor_msgs::ImageConstPtr& msg)
-    {
+    void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg) {
         cv_bridge::CvImageConstPtr cv_ptr;
-        try
-        {
-            cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
-        }
-        catch (cv_bridge::Exception& e)
-        {
-            ROS_FATAL("cv_bridge exception: %s", e.what());
+        try {
+            cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
+        } catch (const cv_bridge::Exception& e) {
+            RCLCPP_FATAL(node_->get_logger(), "cv_bridge exception: %s", e.what());
             return;
         }
         received_image_ = cv_ptr->image.clone();
         callback_count_++;
     }
 
-    bool publishImage(const std::string& imagePath, const std::string& metaPath)
-    {
+    bool publishImage(const std::string& imagePath, const std::string& metaPath) {
         callback_count_ = 0;
-
         cv::Mat mat = cv::imread(imagePath);
+        if(mat.empty()) return false;
 
-        if(mat.empty())
-        {
-            return false;
-        }
-
-        sensor_msgs::ImagePtr img = cv_bridge::CvImage(std_msgs::Header(),
-                                            sensor_msgs::image_encodings::BGR8, mat).toImageMsg();
+        std_msgs::msg::Header hdr;
+        hdr.stamp = node_->now();
+        hdr.frame_id = "tf_frame";
+        auto img = cv_bridge::CvImage(hdr, "bgr8", mat).toImageMsg();
+        
+        cam_info_.header.stamp = hdr.stamp;
         cam_pub_.publish(*img, cam_info_);
         readMetaData(metaPath);
 
-        while(callback_count_ < 3)
-        {
-            ros::spinOnce();
+        // Auf Callbacks warten (Erhöhtes Timeout auf 5 Sekunden für DDS-Verbindungen)
+        auto start_time = node_->now();
+        while(callback_count_ < 3 && (node_->now() - start_time).seconds() < 5.0) {
+            rclcpp::spin_some(node_);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        return true;
+        return (callback_count_ >= 3);
     }
 
-    void readMetaData(const std::string& path)
-    {
+    void readMetaData(const std::string& path) {
         image_meta_.angles.clear();
         image_meta_.centers.clear();
         image_meta_.radius.clear();
 
         cv::FileStorage fs(path, cv::FileStorage::READ);
+        if(!fs.isOpened()) return;
 
         fs["radius"] >> image_meta_.radius;
         fs["angles"] >> image_meta_.angles;
 
         cv::FileNode centersNode = fs["centers"];
-        cv::FileNodeIterator it = centersNode.begin(), it_end = centersNode.end();
-        for( ; it != it_end; ++it)
-        {
+        for(auto it = centersNode.begin(); it != centersNode.end(); ++it) {
             image_meta_.centers.emplace_back((float)(*it)["x"], (float)(*it)["y"]);
         }
         fs.release();
@@ -162,21 +165,15 @@ public:
 
 TEST_F(LandoltTest, testImages)
 {
-    std::string file_names[][2] = {
-        { "landolt-c.png", "landolt-c.yml" }
-    };
-
+    std::string file_names[][2] = { { "landolt-c.png", "landolt-c.yml" } };
     size_t images_count = sizeof(file_names) / sizeof(file_names[0]);
-    for (int i = 0; i < images_count; ++i)
-    {
-        if(!publishImage(data_path_ + file_names[i][0], data_path_ + file_names[i][1]))
-            FAIL();
+    
+    for (size_t i = 0; i < images_count; ++i) {
+        ASSERT_TRUE(publishImage(data_path_ + file_names[i][0], data_path_ + file_names[i][1]));
 
         size_t size = received_landolts_.size();
-
         EXPECT_EQ(size, received_centers_.size());
         EXPECT_EQ(size, received_radius_.size());
-
         EXPECT_EQ(size, image_meta_.angles.size());
         EXPECT_EQ(size, image_meta_.radius.size());
         EXPECT_EQ(size, image_meta_.centers.size());
@@ -185,18 +182,13 @@ TEST_F(LandoltTest, testImages)
         const double boundingError = 3.0;
         const double angleError = 1.0;
 
-        for(int j = 0; j < size; j++)
-        {
+        for(size_t j = 0; j < size; j++) {
             bool hasFound = false;
-            for(int k = 0; k < size; k++)
-            {
-                //Search a landolt at the landolt position in the image
+            for(size_t k = 0; k < size; k++) {
                 if(std::abs(image_meta_.centers[k].x - received_centers_[j].x) < boundingError &&
                    std::abs(image_meta_.centers[k].y - received_centers_[j].y) < boundingError &&
-                    std::abs(image_meta_.radius[k] - received_radius_[j]) < radiusError &&
-                    std::abs(image_meta_.angles[k] - received_landolts_[j]) < angleError)
-                {
-                    //Check if the radius and angle is the near the two values
+                   std::abs(image_meta_.radius[k] - received_radius_[j]) < radiusError &&
+                   std::abs(image_meta_.angles[k] - received_landolts_[j]) < angleError) {
                     hasFound = true;
                     break;
                 }
@@ -207,7 +199,9 @@ TEST_F(LandoltTest, testImages)
 }
 
 int main(int argc, char **argv){
-    ros::init(argc, argv, "landolt_test");
+    rclcpp::init(argc, argv);
     testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    int result = RUN_ALL_TESTS();
+    rclcpp::shutdown();
+    return result;
 }
