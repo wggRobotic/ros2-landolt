@@ -113,7 +113,6 @@ private:
                 circle(img_msg.image, gaps.centers[i], static_cast<int>(gaps.radius[i]), cv::Scalar(0, 0, 1), 3);
             }
             // Speichert das aktuelle Bild im Home-Verzeichnis ab
-            cv::imwrite("/home/corvus/landolt_output.png", img_msg.image);
             auto out = img_msg.toImageMsg();
             image_pub_->publish(*out);
         }
